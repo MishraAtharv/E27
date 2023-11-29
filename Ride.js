@@ -1,0 +1,395 @@
+// Import necessary modules and components
+import React, { Component } from "react";
+import {
+  View,
+  StyleSheet,
+  TextInput,
+  TouchableOpacity,
+  Text,
+  ImageBackground,
+  Image,
+  Alert,
+  KeyboardAvoidingView,
+  ToastAndroid
+} from "react-native";
+import * as Permissions from "expo-permissions";
+import { BarCodeScanner } from "expo-barcode-scanner";
+import firebase from "firebase";
+import db from "../config";
+
+const bgImage = require("../assets/background2.png");
+const appIcon = require("../assets/appIcon.png");
+
+export default class RideScreen extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      bikeId: "",
+      userId: "",
+      domState: "normal",
+      hasCameraPermissions: null,
+      scanned: false,
+      bikeType: "",
+      userName: "",
+    };
+  }
+
+  // Function to request camera permissions
+  getCameraPermissions = async () => {
+    const { status } = await Permissions.askAsync(Permissions.CAMERA);
+
+    this.setState({
+      // status === "granted" is true when user has granted permission
+      // status === "granted" is false when user has not granted the permission
+      hasCameraPermissions: status === "granted",
+      domState: "scanner",
+      scanned: false,
+    });
+  };
+
+  // Function called when a barcode is scanned
+  handleBarCodeScanned = async ({ type, data }) => {
+    this.setState({
+      bikeId: data,
+      domState: "normal",
+      scanned: true,
+    });
+  };
+
+  // Function to handle bike rental or return
+  handleTransaction = async () => {
+    var { bikeId, userId } = this.state;
+
+    // Fetch bike and user details
+    await this.getBikeDetails(bikeId);
+    await this.getUserDetails(userId);
+
+    // Check the Bike Availability using the function 'checkBikeAvailability()' and by passing the argument 'bikeId'
+    // Store the status in a variable 'transactionType'
+    const transactionType = await this.checkBikeAvailability(bikeId);
+
+    if (!transactionType) {
+      // if 'transactionType' is empty, make the 'bikeId' value as ""
+      this.setState({
+        bikeId: "",
+      });
+
+      // Make an alert message to pop on the screen to enter the valid bike id
+      Alert.alert("Please enter a valid bike ID");
+    } else if (transactionType === "under_maintenance") {
+      this.setState({
+        bikeId: "",
+      });
+    } else if (transactionType === "rented") {
+      var { bikeType, userName } = this.state;
+
+      // Rent the bike
+      this.assignBike(bikeId, userId, bikeType, userName);
+
+      // Display a success message
+      Alert.alert("You have rented the bike for the next 1 hour. Enjoy your ride!!!");
+
+      this.setState({
+        bikeAssigned: true,
+      });
+
+      // For Android users only
+      // Uncomment the following lines if you want to use ToastAndroid
+      // ToastAndroid.show(
+      //   "You have rented the bike for the next 1 hour. Enjoy your ride!!",
+      //   ToastAndroid.SHORT
+      // );
+
+    } else {
+      var { bikeType, userName } = this.state;
+
+      // Return the bike
+      this.returnBike(bikeId, userId, bikeType, userName);
+
+      // Display a success message
+      Alert.alert("We hope you enjoyed your ride");
+
+      this.setState({
+        bikeAssigned: false,
+      });
+
+      // For Android users only
+      // Uncomment the following lines if you want to use ToastAndroid
+      // ToastAndroid.show(
+      //   "We hope you enjoyed your ride",
+      //   ToastAndroid.SHORT
+      // );
+    }
+  };
+
+  // Function to fetch bike details from the database
+  getBikeDetails = bikeId => {
+    bikeId = bikeId.trim();
+    db.collection("bicycles")
+      .where("id", "==", bikeId)
+      .get()
+      .then(snapshot => {
+        snapshot.docs.map(doc => {
+          this.setState({
+            bikeType: doc.data().bike_type,
+          });
+        });
+      });
+  };
+
+  // Function to fetch user details from the database
+  getUserDetails = userId => {
+    db.collection("users")
+      .where("id", "==", userId)
+      .get()
+      .then(snapshot => {
+        snapshot.docs.map(doc => {
+          this.setState({
+            userName: doc.data().name,
+            userId: doc.data().id,
+            bikeAssigned: doc.data().bike_assigned,
+          });
+        });
+      });
+  };
+
+  // Function to check bike availability and return the transaction type
+  checkBikeAvailability = async bikeId => {
+    const bikeRef = await db
+      .collection("bicycles")
+      .where("id", "==", bikeId)
+      .get();
+
+    var transactionType = "";
+    if (bikeRef.docs.length === 0) {
+      transactionType = false;
+    } else {
+      bikeRef.docs.map(doc => {
+        if (!doc.data().under_maintenance) {
+          // If the bike is available then the transaction type will be 'rented' otherwise it will be 'return'
+          transactionType = "rented";
+        } else {
+          transactionType = "under_maintenance";
+          Alert.alert(doc.data().maintenance_message);
+        }
+      });
+    }
+
+    return transactionType;
+  };
+
+  // Function to assign a bike to a user
+  assignBike = async (bikeId, userId, bikeType, userName) => {
+    // Add a transaction
+    db.collection("transactions").add({
+      user_id: userId,
+      user_name: userName,
+      bike_id: bikeId,
+      bike_type: bikeType,
+      date: firebase.firestore.Timestamp.now().toDate(),
+      transaction_type: "rented",
+    });
+
+    // Change bike status
+    db.collection("bicycles")
+      .doc(bikeId)
+      .update({
+        is_bike_available: false,
+      });
+
+    // Change the value of bike assigned for the user
+    db.collection("users")
+      .doc(userId)
+      .update({
+        bike_assigned: true,
+      });
+
+    // Updating local state
+    this.setState({
+      bikeId: "",
+    });
+  };
+
+  // Function to return a bike
+  returnBike = async (bikeId, userId, bikeType, userName) => {
+    // Add a transaction
+    db.collection("transactions").add({
+      user_id: userId,
+      user_name: userName,
+      bike_id: bikeId,
+      bike_type: bikeType,
+      date: firebase.firestore.Timestamp.now().toDate(),
+      transaction_type: "return",
+    });
+
+    // Change bike status
+    db.collection("bicycles")
+      .doc(bikeId)
+      .update({
+        is_bike_available: true,
+      });
+
+    // Change the value of bike assigned for the user
+    db.collection("users")
+      .doc(userId)
+      .update({
+        bike_assigned: false,
+      });
+
+    // Updating local state
+    this.setState({
+      bikeId: "",
+    });
+  };
+
+  render() {
+    const { bikeId, userId, domState, scanned, bikeAssigned } = this.state;
+
+    // Check if the barcode scanner is active
+    if (domState !== "normal") {
+      return (
+        <BarCodeScanner
+          onBarCodeScanned={scanned ? undefined : this.handleBarCodeScanned}
+          style={StyleSheet.absoluteFillObject}
+        />
+      );
+    }
+
+    // Render the main UI when not in the barcode scanner mode
+    return (
+      <KeyboardAvoidingView behavior="padding" style={styles.container}>
+        <View style={styles.upperContainer}>
+          <Image source={appIcon} style={styles.appIcon} />
+          <Text style={styles.title}>e-ride</Text>
+          <Text style={styles.subtitle}>A Eco-Friendly Ride</Text>
+        </View>
+        <View style={styles.lowerContainer}>
+          {/* User ID input */}
+          <View style={styles.textinputContainer}>
+            <TextInput
+              style={[styles.textinput, { width: "82%" }]}
+              onChangeText={text => this.setState({ userId: text })}
+              placeholder={"User Id"}
+              placeholderTextColor={"#FFFFFF"}
+              value={userId}
+            />
+          </View>
+
+          {/* Bicycle ID input and scan button */}
+          <View style={[styles.textinputContainer, { marginTop: 25 }]}>
+            <TextInput
+              style={styles.textinput}
+              onChangeText={text => this.setState({ bikeId: text })}
+              placeholder={"Bicycle Id"}
+              placeholderTextColor={"#FFFFFF"}
+              value={bikeId}
+              autoFocus
+            />
+            <TouchableOpacity
+              style={styles.scanbutton}
+              onPress={() => this.getCameraPermissions()}
+            >
+              <Text style={styles.scanbuttonText}>Scan</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Button for initiating the transaction */}
+          <TouchableOpacity
+            style={[styles.button, { marginTop: 25 }]}
+            onPress={this.handleTransaction}
+          >
+            <Text style={styles.buttonText}>
+              {bikeAssigned ? "End Ride" : "Unlock"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    );
+  }
+}
+
+const styles = StyleSheet.create({
+    container: {
+        flex: 1,
+        backgroundColor: "#D0E6F0"
+    },
+    bgImage: {
+        flex: 1,
+        resizeMode: "cover",
+        justifyContent: "center"
+    },
+    upperContainer: {
+        flex: 0.5,
+        justifyContent: "center",
+        alignItems: "center"
+    },
+    appIcon: {
+        width: 200,
+        height: 200,
+        resizeMode: "contain",
+        marginTop: 80
+    },
+    title: {
+        fontSize: 40,
+        fontFamily: "Rajdhani_600SemiBold",
+        paddingTop: 20,
+        color: "#4C5D70"
+    },
+    subtitle: {
+        fontSize: 20,
+        fontFamily: "Rajdhani_600SemiBold",
+        color: "#4C5D70"
+    },
+    lowerContainer: {
+        flex: 0.5,
+        alignItems: "center"
+    },
+    textinputContainer: {
+        borderWidth: 2,
+        borderRadius: 10,
+        flexDirection: "row",
+        backgroundColor: "#4C5D70",
+        borderColor: "#4C5D70"
+    },
+    textinput: {
+        width: "57%",
+        height: 50,
+        padding: 10,
+        borderColor: "#4C5D70",
+        borderRadius: 10,
+        borderWidth: 3,
+        fontSize: 18,
+        backgroundColor: "#F88379",
+        fontFamily: "Rajdhani_600SemiBold",
+        color: "#FFFFFF"
+    },
+    scanbutton: {
+        width: 100,
+        height: 50,
+        backgroundColor: "#FBE5C0",
+        borderTopRightRadius: 10,
+        borderBottomRightRadius: 10,
+        justifyContent: "center",
+        alignItems: "center"
+    },
+    scanbuttonText: {
+        fontSize: 24,
+        color: "#4C5D70",
+        fontFamily: "Rajdhani_600SemiBold"
+    },
+    button: {
+        width: "43%",
+        height: 55,
+        justifyContent: "center",
+        alignItems: "center",
+        backgroundColor: "#FBE5C0",
+        borderRadius: 20,
+        borderWidth: 2,
+        borderColor: "#4C5D70"
+    },
+    buttonText: {
+        fontSize: 24,
+        color: "#4C5D70",
+        fontFamily: "Rajdhani_600SemiBold"
+    }
+});
